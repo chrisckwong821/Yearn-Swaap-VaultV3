@@ -1,2 +1,6 @@
-# Yearn-Swaap-VaultV3
-Yearn-Swaap-VaultV3
+## Install
+
+```bash
+git submodule update --init --recursive
+```
+or run `git clone <this repo> --recurse-submodules --remote-submodules`
