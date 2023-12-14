@@ -158,4 +158,32 @@ contract SwaapStrategy is BaseStrategy {
          */
         return false;
     }
+
+    /**
+     * given $100 worth of want in (amountWant * priceWant)
+     * calculate X to deposit into Aave
+     * such that the borrow out paired asset match with the remaining want (100 - X)
+     * with (at least) the targeted HF
+
+     * Eg1. we want a HF of 2 (assume liqThreshold 80%), for 50/50 pool
+     * then we need to deposit X such that X * 80% (collateral) * 50 / 50 = 2 * (100 - X)
+     * X is 71.42857, the borrowed value => 28.56
+
+     * Eg2. we want a HF of 2 (assume liqThreshold 80%), for 60/40 pool
+     * then we need to deposit X such that X * 80% (collateral) * 60 / 40 = 2 * (100 - X)
+     * X is 62.5, the borrowed value is (100 - 62.5) * 40/60 => 25
+    
+
+     * generallize : X * liqThre * poolRatio = targetHF * (worth - X)
+
+                                      targetHF * worth
+            X =           --------------------------------------- 
+                               liqThre * poolRatio + targetHF 
+     * @return . the amount of paired asset to borrow
+     */
+    function _solveAaveDeposit(uint256 worth, uint256 liqThreshold, uint256 targetPoolRatio, uint256 targetHF) internal pure returns(uint256) {
+        uint256 targetPoolRatio = targetPoolRatio * liqThreshold / 10000; // 10000 is liqThresholdConstant
+        // decimal: HF 18, worth 18, poolRatio 18 => return decimal 18
+        return targetHF * worth  / (targetPoolRatio + targetHF);
+    }
 }
