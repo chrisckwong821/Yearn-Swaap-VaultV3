@@ -188,4 +188,14 @@ contract SwaapStrategy is BaseStrategy {
         // targetPoolRatio should be want($) / borrowedAsset($)
         borrow = deposit * 1e18 / targetPoolRatio;
     }
+
+    function _retrieveAaveLiquidationThreshold(address reserve) internal returns(uint256 liquidationThreshold) {
+        uint256 configuration = aavePool.getConfiguration(reserve);
+        // copied from Aave, reference DataTypes;
+        // https://github.com/aave/aave-v3-core/blob/master/contracts/protocol/libraries/configuration/ReserveConfiguration.sol#L109-L113
+        uint256 LIQUIDATION_THRESHOLD_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000FFFF;
+        uint256 LIQUIDATION_THRESHOLD_START_BIT_POSITION = 16;
+        liquidationThreshold = 
+            (configuration & ~LIQUIDATION_THRESHOLD_MASK) >> LIQUIDATION_THRESHOLD_START_BIT_POSITION;
+    }
 }
