@@ -181,9 +181,11 @@ contract SwaapStrategy is BaseStrategy {
                                liqThre * poolRatio + targetHF 
      * @return . the amount of paired asset to borrow
      */
-    function _solveAaveDeposit(uint256 worth, uint256 liqThreshold, uint256 targetPoolRatio, uint256 targetHF) internal pure returns(uint256) {
-        uint256 targetPoolRatio = targetPoolRatio * liqThreshold / 10000; // 10000 is liqThresholdConstant
+    function _solveAaveDeposit(uint256 worth, uint256 liqThreshold, uint256 targetPoolRatio, uint256 targetHF) internal pure returns(uint256 deposit, uint256 borrow) {
+        uint256 discountedTargetPoolRatio = targetPoolRatio * liqThreshold / 10000; // 10000 is liqThresholdConstant
         // decimal: HF 18, worth 18, poolRatio 18 => return decimal 18
-        return targetHF * worth  / (targetPoolRatio + targetHF);
+        deposit = targetHF * worth  / (discountedTargetPoolRatio + targetHF);
+        // targetPoolRatio should be want($) / borrowedAsset($)
+        borrow = deposit * 1e18 / targetPoolRatio;
     }
 }
