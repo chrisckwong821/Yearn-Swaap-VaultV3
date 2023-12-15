@@ -3,6 +3,50 @@ pragma solidity 0.8.18;
 
 import {BaseStrategy, ERC20} from "lib/tokenized-strategy/src/BaseStrategy.sol";
 
+interface AggregatorV3Interface {
+
+  function latestRoundData()
+    external
+    view
+    returns (
+      uint80 roundId,
+      int256 answer,
+      uint256 startedAt,
+      uint256 updatedAt,
+      uint80 answeredInRound
+    );
+
+}
+interface ISafeguardPool {
+
+    struct InitialOracleParams {
+        AggregatorV3Interface oracle;
+        uint256 maxTimeout;
+        bool isStable;
+        bool isFlexibleOracle;
+    }
+
+    struct OracleParams {
+        AggregatorV3Interface oracle;
+        uint256 maxTimeout;
+        bool isStable;
+        bool isFlexibleOracle;
+        bool isPegged;
+        uint256 priceScalingFactor;
+    }
+    
+    /// @dev returns the current target balances of the pool based on the hodl strategy and latest performance
+    function getHodlBalancesPerPT() external view returns(uint256, uint256);
+    
+    /// @dev returns the on-chain oracle price of tokenIn such that price = amountIn / amountOut
+    function getOnChainAmountInPerOut(address tokenIn) external view returns(uint256);
+    
+    /// @dev returns the current pool oracle parameters
+    function getOracleParams() external view returns(OracleParams[] memory);
+
+}
+
+
 interface ISwaapVault {
 
     function joinPool(
@@ -33,6 +77,16 @@ interface ISwaapVault {
         bool toInternalBalance;
     } 
 
+    function getPoolTokens(bytes32 poolId) external view returns(
+        address[] memory tokens, 
+        uint256[] memory balances,
+        uint256 lastChangeBlock
+    );
+
+    function getPool(bytes32 poolId) external view returns(
+        address poolAddress,
+        uint8 poolSpecialization
+    );
 }
 
 interface IAavePool {
@@ -63,6 +117,10 @@ interface IAavePool {
     uint256 rateMode,
     address onBehalfOf
   ) external returns (uint256);
+
+  function getConfiguration(
+    address reserve
+  ) external view returns(uint256);
 }
 
 enum Action {
@@ -114,7 +172,15 @@ contract SwaapStrategy is BaseStrategy {
          * supply into the swaap pool
          * record any excess "paired" token (if any)
          */ 
-        
+         uint256 targetHF = 2 * 1e18; // @audit decide how to decide target HF
+         uint256 liqThreshold = _retrieveAaveLiquidationThreshold();
+         uint256 targetSwaapRatio = _retriveSwaapTragetPoolRatio();
+         (uint256 deposit, uint256 borrowInUnitOfAsset) = 
+            _solveAaveDeposit(_amount, liqThreshold, targetSwaapRatio, targetHF);
+        lendingPool.deposit(asset, deposit, address(this), 0);
+        uint256 borrow = borrowInUnitOfAsset * _borrowedAssetInUnitOfAsset() / 1e18;
+        lendingPool.borrow(borrowedAsset, borrow, 2, 0, address(this));
+        // @TODO joinPool using the remaining asset and borrowedAsset
     }
 
     /**
@@ -270,7 +336,6 @@ contract SwaapStrategy is BaseStrategy {
                                       targetHF * worth
             X =           --------------------------------------- 
                                liqThre * poolRatio + targetHF 
-     * @return . the amount of paired asset to borrow
      */
     function _solveAaveDeposit(uint256 worth, uint256 liqThreshold, uint256 targetPoolRatio, uint256 targetHF) internal pure returns(uint256 deposit, uint256 borrow) {
         uint256 discountedTargetPoolRatio = targetPoolRatio * liqThreshold / 10000; // 10000 is liqThresholdConstant
@@ -280,8 +345,27 @@ contract SwaapStrategy is BaseStrategy {
         borrow = deposit * 1e18 / targetPoolRatio;
     }
 
-    function _retrieveAaveLiquidationThreshold(address reserve) internal returns(uint256 liquidationThreshold) {
-        uint256 configuration = aavePool.getConfiguration(reserve);
+
+    function _retriveSwaapTragetPoolRatio() internal view returns(uint256) {
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        (uint256 targetBalance0, uint256 targetBalance1) = ISafeguardPool(poolAddress).getHodlBalancesPerPT();
+        // fetch price from the oracle
+        ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        uint256 token0Value = targetBalance0 * uint256(token0Price);
+        uint256 token1Value = targetBalance1 * uint256(token1Price);
+        // return asset / borrowedAsset as a targetRatio
+        // assume price is in 1e8, we want a value of 1e18
+        if (asset > borrowedAsset) {
+            return token1Value * 1e10 / token0Value;
+        } else {
+            return token0Value * 1e10 / token1Value;
+        }
+    }
+    function _retrieveAaveLiquidationThreshold() internal view returns(uint256 liquidationThreshold) {
+        uint256 configuration = lendingPool.getConfiguration(address(asset));
         // copied from Aave, reference DataTypes;
         // https://github.com/aave/aave-v3-core/blob/master/contracts/protocol/libraries/configuration/ReserveConfiguration.sol#L109-L113
         uint256 LIQUIDATION_THRESHOLD_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000FFFF;
@@ -289,5 +373,38 @@ contract SwaapStrategy is BaseStrategy {
         liquidationThreshold = 
             (configuration & ~LIQUIDATION_THRESHOLD_MASK) >> LIQUIDATION_THRESHOLD_START_BIT_POSITION;
     }
+
+    function getLPValue() public view returns(uint256 lpValue) {
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        uint256[] memory balances = new uint256[](2);
+        (,balances,) = ISwaapVault(liquidityPool).getPoolTokens(poolId);
+        uint256 totalSupply = ERC20(poolAddress).totalSupply();
+        uint256 currentBalance = ERC20(poolAddress).balanceOf(address(this));
+        // fetch price from the oracle
+        ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        uint256 token0Value = balances[0] * uint256(token0Price);
+        uint256 token1Value = balances[1] * uint256(token1Price);
+        // assume price is 1e8
+        return currentBalance * (token0Value + token1Value) / totalSupply / 1e8;
+    }
+
+    // return price of borrowedAsset / price of asset in unit of 18
+    function _borrowedAssetInUnitOfAsset() private view returns(uint256) {
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        if (asset > borrowedAsset) {
+            // asset is token1
+            return uint256(token0Price * 1e18 / token1Price);
+        } else {
+            return uint256(token1Price * 1e18 / token0Price);
+        }
+    }
+
 }
 
