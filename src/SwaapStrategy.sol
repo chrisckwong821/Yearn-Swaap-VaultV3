@@ -1,11 +1,97 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity 0.8.18;
 
-import {BaseStrategy} from "lib/tokenized-strategy/src/BaseStrategy.sol";
+import {BaseStrategy, ERC20} from "lib/tokenized-strategy/src/BaseStrategy.sol";
+
+interface ISwaapVault {
+
+    function joinPool(
+        bytes32 poolId,
+        address sender,
+        address recipient,
+        JoinPoolRequest memory request
+    ) external payable;
+
+    struct JoinPoolRequest {
+        ERC20[] assets;
+        uint256[] maxAmountsIn;
+        bytes userData;
+        bool fromInternalBalance;
+    }
+
+   function exitPool(
+        bytes32 poolId,
+        address sender,
+        address payable recipient,
+        ExitPoolRequest memory request
+    ) external;
+
+    struct ExitPoolRequest {
+        ERC20[] assets;
+        uint256[] minAmountsOut;
+        bytes userData;
+        bool toInternalBalance;
+    } 
+
+}
+
+interface IAavePool {
+ function deposit(
+    ERC20 asset,
+    uint256 amount,
+    address onBehalfOf,
+    uint16 referralCode
+  ) external;
+
+  function withdraw(
+    ERC20 asset,
+    uint256 amount,
+    address to
+  ) external returns (uint256);
+
+  function borrow(
+    ERC20 asset,
+    uint256 amount,
+    uint256 interestRateMode,
+    uint16 referralCode,
+    address onBehalfOf
+  ) external;
+
+  function repay(
+    ERC20 asset,
+    uint256 amount,
+    uint256 rateMode,
+    address onBehalfOf
+  ) external returns (uint256);
+}
+
+enum Action {
+        deposit,
+        withdraw, 
+        borrow,
+        repay,
+        join, 
+        exit,
+        swap
+}
 
 contract SwaapStrategy is BaseStrategy {
+    // dev: the storage of tokenised strat is at completely diff location, hence here proxy aka this contract can have its own storage
+    ERC20 internal immutable borrowedAsset;
+    ISwaapVault public liquidityPool;
+    bytes32 public poolId;
+    IAavePool public lendingPool;
+    
+    constructor(address _asset, address _borrowedAsset, string memory _name, address _liquidityPool, bytes32 _poolId, address _lendingPool) BaseStrategy(_asset, _name) {
+        borrowedAsset = ERC20(_borrowedAsset);
+        poolId = _poolId;
+        liquidityPool = ISwaapVault(_liquidityPool); 
+        lendingPool = IAavePool(_lendingPool);
 
-    constructor(address _asset, string memory _name) BaseStrategy(_asset, _name) {
+        ERC20(asset).approve(_liquidityPool, type(uint256).max);
+        ERC20(_borrowedAsset).approve(_liquidityPool, type(uint256).max);
+        ERC20(asset).approve(_lendingPool, type(uint256).max);
+        ERC20(_borrowedAsset).approve(_lendingPool, type(uint256).max);
     }
     /**
      * @dev Should deploy up to '_amount' of 'asset' in the yield source.
@@ -100,62 +186,68 @@ contract SwaapStrategy is BaseStrategy {
     }
         
     
-    /*//////////////////////////////////////////////////////////////
-                    OPTIONAL TO OVERRIDE BY STRATEGIST
-    //////////////////////////////////////////////////////////////*/
+    function rebalance (Action[] memory actions, bytes [] memory params) external onlyManagement {
+        
+        for (uint256 i=0; i< actions.length; i++)
+        {   
+            // Lending
+            if (actions[i] == Action.deposit) 
+            {   
+                (uint256 amount) = abi.decode(params[i], (uint256));
+                lendingPool.deposit(asset, amount, address(this), 0);
+            }
+            else if  (actions[i] == Action.withdraw)  {   
+                (uint256 amount) = abi.decode(params[i], (uint256));
+                lendingPool.withdraw(asset, amount, address(this));
+            } 
+            else if  (actions[i] == Action.borrow)  {   
+                (uint256 amount) = abi.decode(params[i], (uint256));
+                lendingPool.borrow(borrowedAsset, amount, 2, 0, address(this)); // @audit do we want option of stable rate ?
+            } 
+            else if  (actions[i] == Action.repay)  {   
+                (uint256 amount) = abi.decode(params[i], (uint256));
+                lendingPool.repay(borrowedAsset, amount, 2, address(this)); // @audit do we want option of stable rate ?
+            }  
+           // Liquidity 
+            else if (actions[i] == Action.join) {
+                
+                (uint256 amountA, uint256 amountB) = abi.decode(params[i], (uint256, uint256));
+                ISwaapVault.JoinPoolRequest memory j;
+                j.assets = _gibDynamicArrayERC20(asset, borrowedAsset); // @audit does order matter, refractor this later
+                j.maxAmountsIn = _gibDynamicArrayUint256(amountA, amountB);
+                liquidityPool.joinPool(poolId, address(this), address(this), j);
+            }  
+            else if (actions[i] == Action.exit)
+            {
+                (uint256 amountA, uint256 amountB) = abi.decode(params[i], (uint256, uint256));
+                ISwaapVault.ExitPoolRequest memory e;
+                e.assets = _gibDynamicArrayERC20(asset, borrowedAsset); // @audit does order matter
+                e.minAmountsOut = _gibDynamicArrayUint256(amountA, amountB);
+                liquidityPool.exitPool(poolId, address(this), payable(address(this)), e);
+            }
+            else if (actions[i] == Action.swap)
+            {
 
-    /**
-     * @dev Optional function for strategist to override that can
-     *  be called in between reports.
-     *
-     * If '_tend' is used tendTrigger() will also need to be overridden.
-     *
-     * This call can only be called by a permissioned role so may be
-     * through protected relays.
-     *
-     * This can be used to harvest and compound rewards, deposit idle funds,
-     * perform needed position maintenance or anything else that doesn't need
-     * a full report for.
-     *
-     *   EX: A strategy that can not deposit funds without getting
-     *       sandwiched can use the tend when a certain threshold
-     *       of idle to totalAssets has been reached.
-     *
-     * The TokenizedStrategy contract will do all needed debt and idle updates
-     * after this has finished and will have no effect on PPS of the strategy
-     * till report() is called.
-     *
-     * @param _totalIdle The current amount of idle funds that are available to deploy.
-     */
-    function _tend(uint256 _totalIdle) internal override {
-        /** 
-         * @TODO
-         * input is totalIdle fund, but we may need to check collateral status too
-         * assume there is price change(s) in token0 or token1, such that we need to adjust collateral/debt
-         * if remove debt:
-         * similar to _freefund, we withdraw LP first
-         * pay down debt and deposit the excess "want" into collateral
-         * report any profit/loss as a result of performance difference incurred.
-         * if increase debt (debtToken price decreases):
-         * borrow some more debtToken, based on how much _idle fund we have, withdraw deposit if needed
-         * pair and supply into LP
-         */
+            }
+ 
+        }
     }
 
-    /**
-     * @dev Optional trigger to override if tend() will be used by the strategy.
-     * This must be implemented if the strategy hopes to invoke _tend().
-     *
-     * @return . Should return true if tend() should be called by keeper or false if not.
-     */
-    function _tendTrigger() internal view override returns (bool) {
-        /** 
-         * @TODO
-         * define the condition(health factor upper/lower, and optimal level):
-         * which we need to trigger the collateral/debt scale up/down
-         * and to what level
-         * this function then just against the upper/lower threshold
-         */
-        return false;
+    // hacky way to get around, refractor if time permits
+    function _gibDynamicArrayERC20(ERC20 a, ERC20 b) internal returns (ERC20[] memory)
+    {
+           ERC20[] memory dynamicArray = new ERC20[](2);
+           dynamicArray[0] = a;
+           dynamicArray[1] = b;
+           return dynamicArray;
     }
+
+    function _gibDynamicArrayUint256(uint256 a, uint256 b) internal returns (uint256[] memory)
+    {
+           uint256[] memory dynamicArray = new uint256[](2);
+           dynamicArray[0] = a;
+           dynamicArray[1] = b;
+           return dynamicArray;
+    }
+
 }
