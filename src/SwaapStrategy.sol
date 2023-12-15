@@ -121,6 +121,18 @@ interface IAavePool {
   function getConfiguration(
     address reserve
   ) external view returns(uint256);
+
+  function getUserAccountData(address user)
+    external
+    view
+    returns (
+      uint256 totalCollateralETH,
+      uint256 totalDebtETH,
+      uint256 availableBorrowsETH,
+      uint256 currentLiquidationThreshold,
+      uint256 ltv,
+      uint256 healthFactor
+    );
 }
 
 enum Action {
@@ -242,13 +254,12 @@ contract SwaapStrategy is BaseStrategy {
         override
         returns (uint256 _totalAssets) {
         /** 
-         * @TODO
-         * assume after Time T; LP accrues fee/loss
-         * 1.) fetch the underlying token0 and token1 amount/*price
-         * 2.) collect (if any) gov token and swap to "want"
-         * 3.) fetch the collateral and debt in lending market
-         * consolidate them
+         * this function is part of the report work flow
+         * the report function would then update strategy struct 
+         * in TokenizedStrategy
+         * totalAssets is implemented as totalIdle + totalDebt there
          */
+         return getAaveValue() + getLPValue();
     }
         
     
@@ -391,7 +402,15 @@ contract SwaapStrategy is BaseStrategy {
         return currentBalance * (token0Value + token1Value) / totalSupply / 1e8;
     }
 
-    // return price of borrowedAsset / price of asset in unit of 18
+    // find the collateralValue - debtValue
+    // @audit use aave price or swaap price feed?
+    function getAaveValue() public view returns(uint256 netValue) {
+        // collateral is asset
+        (uint256 totalCollateralBase, uint256 totalDebtBase,,,,) = lendingPool.getUserAccountData(address(this));
+        netValue = totalCollateralBase - totalDebtBase;
+    }
+
+    // return priceBorrowedAsset / priceAsset in unit of 18
     function _borrowedAssetInUnitOfAsset() private view returns(uint256) {
         (address poolAddress, ) = liquidityPool.getPool(poolId);
         ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
