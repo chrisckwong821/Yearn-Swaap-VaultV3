@@ -236,6 +236,7 @@ contract SwaapStrategy is BaseStrategy {
     // hacky way to get around, refractor if time permits
     function _gibDynamicArrayERC20(ERC20 a, ERC20 b) internal returns (ERC20[] memory)
     {
+           (a, b) = _sortTwoTokens(a, b);
            ERC20[] memory dynamicArray = new ERC20[](2);
            dynamicArray[0] = a;
            dynamicArray[1] = b;
@@ -250,4 +251,10 @@ contract SwaapStrategy is BaseStrategy {
            return dynamicArray;
     }
 
+    /**
+     * @dev Sorts two tokens in ascending order, returning them as a (tokenA, tokenB) tuple.
+     */
+    function _sortTwoTokens(ERC20 tokenX, ERC20 tokenY) private pure returns (ERC20, ERC20) {
+        return tokenX < tokenY ? (tokenX, tokenY) : (tokenY, tokenX);
+    }
 }
