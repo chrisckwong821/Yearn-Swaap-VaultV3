@@ -191,10 +191,9 @@ contract SwaapStrategy is BaseStrategy {
             _solveAaveDeposit(_amount, liqThreshold, targetSwaapRatio, targetHF);
         lendingPool.deposit(asset, deposit, address(this), 0);
         // assume we need to borrow 25 matic worth of USDC
-        // then we need to find 25 / (price of matic / price of USDC)
-        // or 25 * (price of USDC / price of matic)
+        // then we need to find 25 / (price of USDC / price of matic)
         // _borrowedAssetInUnitOfAsset = priceOfBorrowed / priceAsset
-        uint256 borrow = borrowInUnitOfAsset * _borrowedAssetInUnitOfAsset() / 1e18;
+        uint256 borrow = borrowInUnitOfAsset / _borrowedAssetInUnitOfAsset() / 1e18;
         lendingPool.borrow(borrowedAsset, borrow, 2, 0, address(this));
         // @TODO joinPool using the remaining asset and borrowedAsset
     }
