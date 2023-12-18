@@ -1,81 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0
 pragma solidity 0.8.18;
 
-import {BaseStrategy, ERC20} from "lib/tokenized-strategy/src/BaseStrategy.sol";
-
-interface ISwaapVault {
-
-    function joinPool(
-        bytes32 poolId,
-        address sender,
-        address recipient,
-        JoinPoolRequest memory request
-    ) external payable;
-
-    struct JoinPoolRequest {
-        ERC20[] assets;
-        uint256[] maxAmountsIn;
-        bytes userData;
-        bool fromInternalBalance;
-    }
-
-   function exitPool(
-        bytes32 poolId,
-        address sender,
-        address payable recipient,
-        ExitPoolRequest memory request
-    ) external;
-
-    struct ExitPoolRequest {
-        ERC20[] assets;
-        uint256[] minAmountsOut;
-        bytes userData;
-        bool toInternalBalance;
-    } 
-
-}
-
-interface IAavePool {
- function deposit(
-    ERC20 asset,
-    uint256 amount,
-    address onBehalfOf,
-    uint16 referralCode
-  ) external;
-
-  function withdraw(
-    ERC20 asset,
-    uint256 amount,
-    address to
-  ) external returns (uint256);
-
-  function borrow(
-    ERC20 asset,
-    uint256 amount,
-    uint256 interestRateMode,
-    uint16 referralCode,
-    address onBehalfOf
-  ) external;
-
-  function repay(
-    ERC20 asset,
-    uint256 amount,
-    uint256 rateMode,
-    address onBehalfOf
-  ) external returns (uint256);
-}
-
-enum Action {
-        deposit,
-        withdraw, 
-        borrow,
-        repay,
-        join, 
-        exit,
-        swap
-}
-
-contract SwaapStrategy is BaseStrategy {
+import {BaseStrategy} from "lib/tokenized-strategy/src/BaseStrategy.sol";
+import {SwaapEncodings} from "./utils/SwaapEncodings.sol";
+import "./utils/Interfaces.sol";
+contract SwaapStrategy is BaseStrategy, SwaapEncodings {
     // dev: the storage of tokenised strat is at completely diff location, hence here proxy aka this contract can have its own storage
     ERC20 internal immutable borrowedAsset;
     ISwaapVault public liquidityPool;
@@ -211,10 +140,11 @@ contract SwaapStrategy is BaseStrategy {
            // Liquidity 
             else if (actions[i] == Action.join) {
                 
-                (uint256 amountA, uint256 amountB) = abi.decode(params[i], (uint256, uint256));
+                (uint256 amountA, uint256 amountB, uint256 bptOut) = abi.decode(params[i], (uint256, uint256, uint256));
                 ISwaapVault.JoinPoolRequest memory j;
                 j.assets = _gibDynamicArrayERC20(asset, borrowedAsset); // @audit does order matter, refractor this later
                 j.maxAmountsIn = _gibDynamicArrayUint256(amountA, amountB);
+                j.userData = getUserDataForProportionalJoin(bptOut);
                 liquidityPool.joinPool(poolId, address(this), address(this), j);
             }  
             else if (actions[i] == Action.exit)
