@@ -2,6 +2,9 @@
 pragma solidity 0.8.18;
 
 import {BaseStrategy, ERC20} from "lib/tokenized-strategy/src/BaseStrategy.sol";
+interface IERC20Metadata {
+    function decimals() external view returns(uint8);
+}
 
 interface AggregatorV3Interface {
 
@@ -193,7 +196,7 @@ contract SwaapStrategy is BaseStrategy {
         // assume we need to borrow 25 matic worth of USDC
         // then we need to find 25 / (price of USDC / price of matic)
         // _borrowedAssetInUnitOfAsset = priceOfBorrowed / priceAsset
-        uint256 borrow = borrowInUnitOfAsset / _borrowedAssetInUnitOfAsset() / 1e18;
+        uint256 borrow = borrowInUnitOfAsset * 1e18 / _borrowedAssetPriceInUnitOfAsset();
         lendingPool.borrow(borrowedAsset, borrow, 2, 0, address(this));
         // @TODO joinPool using the remaining asset and borrowedAsset
     }
@@ -351,17 +354,21 @@ contract SwaapStrategy is BaseStrategy {
             X =           --------------------------------------- 
                                liqThre * poolRatio + targetHF 
      */
-    function _solveAaveDeposit(uint256 worth, uint256 liqThreshold, uint256 targetPoolRatio, uint256 targetHF) internal pure returns(uint256 deposit, uint256 borrow) {
+    function _solveAaveDeposit(uint256 worth, uint256 liqThreshold, uint256 targetPoolRatio, uint256 targetHF) internal view returns(uint256 deposit, uint256 borrow) {
         uint256 discountedTargetPoolRatio = targetPoolRatio * liqThreshold / 10000; // 10000 is liqThresholdConstant
         // decimal: HF 18, worth 18, poolRatio 18 => return decimal 18
         deposit = targetHF * worth  / (discountedTargetPoolRatio + targetHF);
         // targetPoolRatio should be want($) / borrowedAsset($)
-        borrow = deposit * 1e18 / targetPoolRatio;
+        // borrow needs to calibrate to its own decimal
+        borrow = (worth - deposit) * 1e18 * (10 ** IERC20Metadata(address(borrowedAsset)).decimals()) 
+        /  targetPoolRatio
+        / (10 ** IERC20Metadata(address(asset)).decimals());
     }
 
 
     function _retriveSwaapTragetPoolRatio() internal view returns(uint256) {
         (address poolAddress, ) = liquidityPool.getPool(poolId);
+        // target balance is normalized to 1e18
         (uint256 targetBalance0, uint256 targetBalance1) = ISafeguardPool(poolAddress).getHodlBalancesPerPT();
         // fetch price from the oracle
         ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
@@ -373,9 +380,9 @@ contract SwaapStrategy is BaseStrategy {
         // return asset / borrowedAsset as a targetRatio
         // assume price is in 1e8, we want a value of 1e18
         if (asset > borrowedAsset) {
-            return token1Value * 1e10 / token0Value;
+            return token1Value * 1e18 / token0Value;
         } else {
-            return token0Value * 1e10 / token1Value;
+            return token0Value * 1e18 / token1Value;
         }
     }
     function _retrieveAaveLiquidationThreshold() internal view returns(uint256 liquidationThreshold) {
@@ -414,7 +421,7 @@ contract SwaapStrategy is BaseStrategy {
     }
 
     // return priceBorrowedAsset / priceAsset in unit of 18
-    function _borrowedAssetInUnitOfAsset() private view returns(uint256) {
+    function _borrowedAssetPriceInUnitOfAsset() private view returns(uint256) {
         (address poolAddress, ) = liquidityPool.getPool(poolId);
         ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
         oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
@@ -427,6 +434,8 @@ contract SwaapStrategy is BaseStrategy {
             return uint256(token1Price * 1e18 / token0Price);
         }
     }
-
+    function tokenAmountIn18Decimals(address asset, uint256 amount) public view returns(uint256) {
+        return amount * 1e18 / (10 ** IERC20Metadata(asset).decimals());
+    }
 }
 
