@@ -35,7 +35,7 @@ contract HarvestTest is Test {
     bytes32 poolId= 0x3fbf7753ff5b217ca8ffbb441939c20bf3ec3be1000200000000000000000002;
     address AavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf;
     address TokenizedStrategyAddress =0x2e234DAe75C793f67A35089C9d99245E1C58470b;
-
+    ERC20 SwaapUSDCMaticPoolToken = ERC20(0x3fbF7753fF5B217CA8FfBB441939c20bF3EC3be1);
     function setUp() public {
         string memory POLYGON_RPC_URL = vm.envString("POLYGON_RPC_URL");
         polygonFork = vm.createFork(POLYGON_RPC_URL);
@@ -134,15 +134,16 @@ contract HarvestTest is Test {
         WMATIC.transfer(address(strategyProxyFunctions), 100e18);
 
         strategyProxyFunctions.rebalance(actions, params);
-        // (
-        // uint256 totalCollateralETH,
-        // uint256 totalDebtETH,
-        // uint256 availableBorrowsETH,
-        // uint256 currentLiquidationThreshold,
-        // uint256 ltv,
-        // uint256 healthFactor
-        // ) = ILendingPool(AavePool).getUserAccountData(address(strategyProxyFunctions));
-        // assertGe(totalCollateralETH, 0);
-        // console.log(totalCollateralETH);
+        assert(SwaapUSDCMaticPoolToken.balanceOf(address(strategyProxyFunctions)) == 1e6);
+    }
+    function testRebalanceJoinExitPool() public {
+        testRebalanceJoinPool();
+        Action[] memory actions = new Action[](1);
+        bytes[] memory params = new bytes[](1);
+        actions[0] = Action.exit;
+        params[0] = abi.encode(0, 0, 1e6);
+        skip(3600); // swaap error 16
+        strategyProxyFunctions.rebalance(actions, params);
+        assert(SwaapUSDCMaticPoolToken.balanceOf(address(strategyProxyFunctions)) == 0);
     }
 }
