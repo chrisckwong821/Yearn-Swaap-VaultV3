@@ -29,12 +29,13 @@ contract HarvestTest is Test {
     ERC20 USDC = ERC20(0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174);
     ERC20 WMATIC = ERC20(0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270);
     address USDCWhale = 0xf89d7b9c864f589bbF53a82105107622B35EaA40;
+    address WMATICWhale = 0x0c54a0BCCF5079478a144dBae1AFcb4FEdf7b263;
 
     address SwaapVault = 0xd315a9C38eC871068FEC378E4Ce78AF528C76293;
-    bytes32 poolId= 0x0e58b97a209526d6c85fff215f48284be9611c8a000200000000000000000001;
+    bytes32 poolId= 0x3fbf7753ff5b217ca8ffbb441939c20bf3ec3be1000200000000000000000002;
     address AavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf;
     address TokenizedStrategyAddress =0x2e234DAe75C793f67A35089C9d99245E1C58470b;
-
+    ERC20 SwaapUSDCMaticPoolToken = ERC20(0x3fbF7753fF5B217CA8FfBB441939c20bF3EC3be1);
     function setUp() public {
         string memory POLYGON_RPC_URL = vm.envString("POLYGON_RPC_URL");
         polygonFork = vm.createFork(POLYGON_RPC_URL);
@@ -46,6 +47,10 @@ contract HarvestTest is Test {
 
         vm.startPrank(USDCWhale);
         USDC.transfer(address(this), 100000e6);
+        vm.stopPrank();
+
+        vm.startPrank(WMATICWhale);
+        WMATIC.transfer(address(this), 100000e18);
         vm.stopPrank();
     }
 
@@ -117,5 +122,28 @@ contract HarvestTest is Test {
         params2[0] = abi.encode(10e18);
         strategyProxyFunctions.rebalance(actions2, params2);
         assertEq(WMATIC.balanceOf(address(strategyProxyFunctions)), 0);
+    }
+
+    function testRebalanceJoinPool() public {
+        Action[] memory actions = new Action[](1);
+        bytes[] memory params = new bytes[](1);
+        actions[0] = Action.join;
+        params[0] = abi.encode(10000e6, 100e18, 1e6);
+
+        USDC.transfer(address(strategyProxyFunctions), 10000e6);
+        WMATIC.transfer(address(strategyProxyFunctions), 100e18);
+
+        strategyProxyFunctions.rebalance(actions, params);
+        assert(SwaapUSDCMaticPoolToken.balanceOf(address(strategyProxyFunctions)) == 1e6);
+    }
+    function testRebalanceJoinExitPool() public {
+        testRebalanceJoinPool();
+        Action[] memory actions = new Action[](1);
+        bytes[] memory params = new bytes[](1);
+        actions[0] = Action.exit;
+        params[0] = abi.encode(0, 0, 1e6);
+        skip(3600); // swaap error 16
+        strategyProxyFunctions.rebalance(actions, params);
+        assert(SwaapUSDCMaticPoolToken.balanceOf(address(strategyProxyFunctions)) == 0);
     }
 }

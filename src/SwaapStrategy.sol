@@ -192,18 +192,20 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
            // Liquidity 
             else if (actions[i] == Action.join) {
                 
-                (uint256 amountA, uint256 amountB) = abi.decode(params[i], (uint256, uint256));
+                (uint256 amountA, uint256 amountB, uint256 bptOut) = abi.decode(params[i], (uint256, uint256, uint256));
                 ISwaapVault.JoinPoolRequest memory j;
                 j.assets = _gibDynamicArrayERC20(asset, borrowedAsset); // @audit does order matter, refractor this later
                 j.maxAmountsIn = _gibDynamicArrayUint256(amountA, amountB);
+                j.userData = getUserDataForProportionalJoin(bptOut);
                 liquidityPool.joinPool(poolId, address(this), address(this), j);
             }  
             else if (actions[i] == Action.exit)
             {
-                (uint256 amountA, uint256 amountB) = abi.decode(params[i], (uint256, uint256));
+                (uint256 amountA, uint256 amountB, uint256 bptIn) = abi.decode(params[i], (uint256, uint256, uint256));
                 ISwaapVault.ExitPoolRequest memory e;
                 e.assets = _gibDynamicArrayERC20(asset, borrowedAsset); // @audit does order matter
                 e.minAmountsOut = _gibDynamicArrayUint256(amountA, amountB);
+                e.userData = getUserDataForProportionalExit(bptIn);
                 liquidityPool.exitPool(poolId, address(this), payable(address(this)), e);
             }
             else if (actions[i] == Action.swap)
