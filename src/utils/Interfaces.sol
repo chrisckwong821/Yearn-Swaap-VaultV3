@@ -1,6 +1,6 @@
+pragma solidity 0.8.18;
 
 import {ERC20} from "lib/tokenized-strategy/src/BaseStrategy.sol";
-
 
 interface IERC20Metadata {
     function decimals() external view returns(uint8);
@@ -91,7 +91,7 @@ interface ISwaapVault {
         address poolAddress,
         uint8 poolSpecialization
     );
-
+}
 
 interface IAavePool {
  function deposit(
