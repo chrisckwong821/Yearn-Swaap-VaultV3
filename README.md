@@ -30,4 +30,4 @@ Some of these assumptions are precautionary, while others must be carefully cons
 Depending upon feedback from you all, if we are confident that users would love to use this, we can continue the development of this strategy. </br>
 Initially, we will prioritize testing all scenarios and reviewing our assumptions.</br>
 Subsequently, we intend to implement some improvements into the current strategies and a DOUBLE strategy as demonstrated in the following video.</br>
-**Double LP Strategy** : [<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/b/b8/YouTube_play_button_icon_%282013%E2%80%932017%29.svg/1280px-YouTube_play_button_icon_%282013%E2%80%932017%29.svg.png" width="30px">](https://drive.google.com/file/d/1NthnMwXqwwoR442BtO1iS9nsBSPfBOKy/view?usp=drive_link)
+**Future implementations** : [<img src="https://upload.wikimedia.org/wikipedia/commons/thumb/b/b8/YouTube_play_button_icon_%282013%E2%80%932017%29.svg/1280px-YouTube_play_button_icon_%282013%E2%80%932017%29.svg.png" width="30px">](https://drive.google.com/file/d/1NthnMwXqwwoR442BtO1iS9nsBSPfBOKy/view?usp=drive_link)
