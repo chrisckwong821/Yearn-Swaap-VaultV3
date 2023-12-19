@@ -21,6 +21,8 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
         ERC20(_borrowedAsset).approve(_liquidityPool, type(uint256).max);
         ERC20(asset).approve(_lendingPool, type(uint256).max);
         ERC20(_borrowedAsset).approve(_lendingPool, type(uint256).max);
+        (address lpToken,) = ISwaapVault(liquidityPool).getPool(poolId);
+        ERC20(lpToken).approve(_liquidityPool, type(uint256).max);
     }
     /**
      * @dev Should deploy up to '_amount' of 'asset' in the yield source.
@@ -35,7 +37,6 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
      */
     function _deployFunds(uint256 _amount) internal override {
         /** 
-         * @TODO
          * assume we have 100 excess "want"
          * using "LTV", "price", calculate the amount of "want" to deposit into lending market
          * calculate the amount of "paired" token to borrow
@@ -43,6 +44,35 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
          * supply into the swaap pool
          * record any excess "paired" token (if any)
          */ 
+         uint256 targetHF = 2 * 1e18; // @audit decide how to decide target HF
+         uint256 liqThreshold = _retrieveAaveLiquidationThreshold();
+         uint256 targetSwaapRatio = _retriveSwaapTragetPoolRatio();
+         (uint256 deposit, uint256 borrowInUnitOfAsset) = 
+            _solveAaveDeposit(_amount, liqThreshold, targetSwaapRatio, targetHF);
+        lendingPool.deposit(asset, deposit, address(this), 0);
+        // assume we need to borrow 25 matic worth of USDC
+        // then we need to find 25 / (price of USDC / price of matic)
+        // _borrowedAssetInUnitOfAsset = priceOfBorrowed / priceAsset
+        uint256 borrow = borrowInUnitOfAsset * 1e18 / _borrowedAssetPriceInUnitOfAsset();
+        lendingPool.borrow(borrowedAsset, borrow, 2, 0, address(this));
+        // joinPool
+        // the amount of asset to supply into Swaap is the input _amount, minus the amount deposited int Aave
+        uint256 amountA = _amount - deposit;
+        uint256 amountB = borrow;
+        // expect a router to enforce slippage protection on top of the ERC4626 vault level
+        // 0.5% @audit dynamic slippage
+        uint256 slippage = 50;
+        uint256 minimumBPT = _calcBPToExpect() * (10000 - slippage) / 100000;
+        ISwaapVault.JoinPoolRequest memory j;
+        j.assets = _gibDynamicArrayERC20(asset, borrowedAsset); // @audit does order matter, refractor this later
+        // @TODO use getUserDataForExactJoin
+        if (asset < borrowedAsset) {
+            j.maxAmountsIn = _gibDynamicArrayUint256(amountA, amountB);
+        } else {
+            j.maxAmountsIn = _gibDynamicArrayUint256(amountB, amountA);
+        }
+        j.userData = getUserDataForProportionalJoin(minimumBPT);
+        liquidityPool.joinPool(poolId, address(this), address(this), j);
         
     }
 
@@ -69,14 +99,37 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
      */
     function _freeFunds(uint256 _amount) internal override {
         /** 
-         * @TODO
          * assume we need 100 "want"
          * we need to scale down the entire position (LP, deposit and borrow in lending market)
          * 1.) withdraw some LP
          * 2.) repay the debt 
          * 3.) withdraw some want
          */ 
-        
+        uint256 lpToWithdraw = _calcLpWithdraw(_amount);
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        uint256 lpBalance = ERC20(poolAddress).balanceOf(address(this));
+        //min of the entire lp balance or required amount
+        lpToWithdraw = lpToWithdraw > lpBalance ? lpBalance : lpToWithdraw;
+        uint256 bptIn = lpToWithdraw;
+        uint256 amountA = 0;
+        uint256 amountB = 0;
+        ISwaapVault.ExitPoolRequest memory e;
+        e.assets = _gibDynamicArrayERC20(asset, borrowedAsset);
+        // @TODO use getUserDataForExactJoin
+        if (asset < borrowedAsset) {
+            e.minAmountsOut = _gibDynamicArrayUint256(amountA, amountB);
+        } else {
+            e.minAmountsOut = _gibDynamicArrayUint256(amountB, amountA);
+        }
+        e.userData = getUserDataForProportionalExit(bptIn);
+
+        uint256 assetBefore = ERC20(asset).balanceOf(address(this));
+        liquidityPool.exitPool(poolId, address(this), payable(address(this)), e);
+        uint256 assetFromExitPool = ERC20(asset).balanceOf(address(this)) - assetBefore;
+        // repay all borrowedAsset 
+        lendingPool.repay(borrowedAsset, ERC20(borrowedAsset).balanceOf(address(this)), 2, address(this));
+         // withdraw additional asset, to cover the entire requested amount
+        lendingPool.withdraw(asset, _amount - assetFromExitPool, address(this));
     }
     /**
      * @dev Internal function to harvest all rewards, redeploy any idle
@@ -105,13 +158,12 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
         override
         returns (uint256 _totalAssets) {
         /** 
-         * @TODO
-         * assume after Time T; LP accrues fee/loss
-         * 1.) fetch the underlying token0 and token1 amount/*price
-         * 2.) collect (if any) gov token and swap to "want"
-         * 3.) fetch the collateral and debt in lending market
-         * consolidate them
+         * this function is part of the report work flow
+         * the report function would then update strategy struct 
+         * in TokenizedStrategy
+         * totalAssets is implemented as totalIdle + totalDebt there
          */
+         return getAaveValue() + getLPValue();
     }
         
     
@@ -188,4 +240,174 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
     function _sortTwoTokens(ERC20 tokenX, ERC20 tokenY) private pure returns (ERC20, ERC20) {
         return tokenX < tokenY ? (tokenX, tokenY) : (tokenY, tokenX);
     }
+
+    /**
+     * given $100 worth of want in (amountWant * priceWant)
+     * calculate X to deposit into Aave
+     * such that the borrow out paired asset match with the remaining want (100 - X)
+     * with (at least) the targeted HF
+
+     * Eg1. we want a HF of 2 (assume liqThreshold 80%), for 50/50 pool
+     * then we need to deposit X such that X * 80% (collateral) * 50 / 50 = 2 * (100 - X)
+     * X is 71.42857, the borrowed value => 28.56
+
+     * Eg2. we want a HF of 2 (assume liqThreshold 80%), for 60/40 pool
+     * then we need to deposit X such that X * 80% (collateral) * 60 / 40 = 2 * (100 - X)
+     * X is 62.5, the borrowed value is (100 - 62.5) * 40/60 => 25
+    
+
+     * generallize : X * liqThre * poolRatio(asset/borrowedAsset) = targetHF * (worth - X)
+
+                                      targetHF * worth
+            X =           --------------------------------------- 
+                               liqThre * poolRatio + targetHF 
+     */
+    function _solveAaveDeposit(uint256 worth, uint256 liqThreshold, uint256 targetPoolRatio, uint256 targetHF) internal view returns(uint256 deposit, uint256 borrow) {
+        uint256 discountedTargetPoolRatio = targetPoolRatio * liqThreshold / 10000; // 10000 is liqThresholdConstant
+        // decimal: HF 18, worth 18, poolRatio 18 => return decimal 18
+        deposit = targetHF * worth  / (discountedTargetPoolRatio + targetHF);
+        // targetPoolRatio should be want($) / borrowedAsset($)
+        // borrow needs to calibrate to its own decimal
+        borrow = (worth - deposit) * 1e18 * (10 ** IERC20Metadata(address(borrowedAsset)).decimals()) 
+        /  targetPoolRatio
+        / (10 ** IERC20Metadata(address(asset)).decimals());
+    }
+
+
+    function _retriveSwaapTragetPoolRatio() internal view returns(uint256) {
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        // target balance is normalized to 1e18
+        (uint256 targetBalance0, uint256 targetBalance1) = ISafeguardPool(poolAddress).getHodlBalancesPerPT();
+        // fetch price from the oracle
+        ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        uint256 token0Value = targetBalance0 * uint256(token0Price);
+        uint256 token1Value = targetBalance1 * uint256(token1Price);
+        // return asset / borrowedAsset as a targetRatio
+        // assume price is in 1e8, we want a value of 1e18
+        if (asset > borrowedAsset) {
+            return token1Value * 1e18 / token0Value;
+        } else {
+            return token0Value * 1e18 / token1Value;
+        }
+    }
+    function _retrieveAaveLiquidationThreshold() internal view returns(uint256 liquidationThreshold) {
+        uint256 configuration = lendingPool.getConfiguration(address(asset));
+        // copied from Aave, reference DataTypes;
+        // https://github.com/aave/protocol-v2/blob/master/contracts/protocol/libraries/configuration/ReserveConfiguration.sol#L80-L86
+        uint256 LIQUIDATION_THRESHOLD_MASK = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0000FFFF;
+        uint256 LIQUIDATION_THRESHOLD_START_BIT_POSITION = 16;
+        liquidationThreshold = 
+            (configuration & ~LIQUIDATION_THRESHOLD_MASK) >> LIQUIDATION_THRESHOLD_START_BIT_POSITION;
+    }
+
+
+
+    function getLPValue() public view returns(uint256 lpValue) {
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        uint256[] memory balances = new uint256[](2);
+        (,balances,) = ISwaapVault(liquidityPool).getPoolTokens(poolId);
+        uint256 totalSupply = ERC20(poolAddress).totalSupply();
+        uint256 currentBalance = ERC20(poolAddress).balanceOf(address(this));
+        // fetch price from the oracle
+        ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        uint256 token0Value;
+        uint256 token1Value;
+        if (asset < borrowedAsset) {
+            token0Value = tokenAmountIn18Decimals(asset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(borrowedAsset, balances[1]) * uint256(token1Price);
+        } else {
+            token0Value = tokenAmountIn18Decimals(borrowedAsset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(asset, balances[1]) * uint256(token1Price);
+        }
+        // assume price is 1e8
+        return currentBalance * (token0Value + token1Value) / totalSupply / 1e8;
+    }
+
+    // find the collateralValue - debtValue
+    // @audit use aave price or swaap price feed?
+    function getAaveValue() public view returns(uint256 netValue) {
+        // collateral is asset
+        (uint256 totalCollateralBase, uint256 totalDebtBase,,,,) = lendingPool.getUserAccountData(address(this));
+        netValue = totalCollateralBase - totalDebtBase;
+    }
+
+    // return priceBorrowedAsset / priceAsset in unit of 18
+    function _borrowedAssetPriceInUnitOfAsset() private view returns(uint256) {
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        // ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        // oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        // (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        // (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        // if (asset > borrowedAsset) {
+        //     // asset is token1
+        //     return uint256(token0Price * 1e18 / token1Price);
+        // } else {
+        //     return uint256(token1Price * 1e18 / token0Price);
+        // }
+        return ISafeguardPool(poolAddress).getOnChainAmountInPerOut(address(borrowedAsset));
+    }
+
+    function _calcLpWithdraw(uint256 _amountAsset) internal view returns(uint256 lpAmount) {
+         (address poolAddress, ) = liquidityPool.getPool(poolId);
+        uint256[] memory balances = new uint256[](2);
+        (,balances,) = ISwaapVault(liquidityPool).getPoolTokens(poolId);
+        uint256 totalSupply = ERC20(poolAddress).totalSupply();
+        // fetch price from the oracle
+        ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        uint256 token0Value;
+        uint256 token1Value;
+        uint256 lpAmount;
+        if (asset < borrowedAsset) {
+            token0Value = tokenAmountIn18Decimals(asset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(borrowedAsset, balances[1]) * uint256(token1Price);
+            lpAmount = tokenAmountIn18Decimals(asset, _amountAsset) * uint256(token0Price) * totalSupply / (token0Value + token1Value);
+        } else {
+            token0Value = tokenAmountIn18Decimals(borrowedAsset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(asset, balances[1]) * uint256(token1Price);
+            lpAmount = tokenAmountIn18Decimals(asset, _amountAsset) * uint256(token1Price) * totalSupply / (token0Value + token1Value);
+        }
+        
+    }
+    function _calcBPToExpect() internal view returns(uint256) {
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        uint256[] memory balances = new uint256[](2);
+        (,balances,) = ISwaapVault(liquidityPool).getPoolTokens(poolId);
+        uint256 totalSupply = ERC20(poolAddress).totalSupply();
+        // fetch price from the oracle
+        ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        uint256 token0Value;
+        uint256 token1Value;
+        uint256 currentToken0Value;
+        uint256 currentToken1Value;
+        if (asset < borrowedAsset) {
+            token0Value = tokenAmountIn18Decimals(asset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(borrowedAsset, balances[1]) * uint256(token1Price);
+            currentToken0Value = tokenAmountIn18Decimals(asset, ERC20(asset).balanceOf(address(this))) * uint256(token0Price);
+            currentToken1Value = tokenAmountIn18Decimals(borrowedAsset, ERC20(borrowedAsset).balanceOf(address(this))) * uint256(token1Price);
+        } else {
+            token0Value = tokenAmountIn18Decimals(borrowedAsset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(asset, balances[1]) * uint256(token1Price);
+            currentToken0Value = tokenAmountIn18Decimals(borrowedAsset, ERC20(borrowedAsset).balanceOf(address(this))) * uint256(token0Price);
+            currentToken1Value = tokenAmountIn18Decimals(asset, ERC20(asset).balanceOf(address(this))) * uint256(token1Price);
+        }
+        // assume price is 1e8
+        return (currentToken0Value + currentToken1Value) * totalSupply / (token0Value + token1Value);
+    }
+    function tokenAmountIn18Decimals(ERC20 asset, uint256 amount) public view returns(uint256) {
+        return amount * 1e18 / (10 ** IERC20Metadata(address(asset)).decimals());
+    }
+
 }
+
