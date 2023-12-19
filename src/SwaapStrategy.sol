@@ -21,6 +21,8 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
         ERC20(_borrowedAsset).approve(_liquidityPool, type(uint256).max);
         ERC20(asset).approve(_lendingPool, type(uint256).max);
         ERC20(_borrowedAsset).approve(_lendingPool, type(uint256).max);
+        (address lpToken,) = ISwaapVault(liquidityPool).getPool(poolId);
+        ERC20(lpToken).approve(_liquidityPool, type(uint256).max);
     }
     /**
      * @dev Should deploy up to '_amount' of 'asset' in the yield source.
@@ -58,7 +60,7 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
         uint256 amountA = _amount - deposit;
         uint256 amountB = borrow;
         // expect a router to enforce slippage protection on top of the ERC4626 vault level
-        // 0.5%
+        // 0.5% @audit dynamic slippage
         uint256 slippage = 50;
         uint256 minimumBPT = _calcBPToExpect() * (10000 - slippage) / 100000;
         ISwaapVault.JoinPoolRequest memory j;
@@ -103,15 +105,31 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
          * 2.) repay the debt 
          * 3.) withdraw some want
          */ 
-        uint256 minimumBPT = 0;
-        uint256 amountA = _amount;
-        // uint256 amountB = borrow;
-        // ISwaapVault.ExitPoolRequest memory e;
-        // e.assets = _gibDynamicArrayERC20(asset, borrowedAsset);
-        // e.minAmountsOut = _gibDynamicArrayUint256(amountA, amountB);
-        // e.userData = getUserDataForProportionalExit(minimumBPT);
-        // liquidityPool.exitPool(poolId, address(this), payable(address(this)), e);
-        
+        uint256 lpToWithdraw = _calcLpWithdraw(_amount);
+        (address poolAddress, ) = liquidityPool.getPool(poolId);
+        uint256 lpBalance = ERC20(poolAddress).balanceOf(address(this));
+        //min of the entire lp balance or required amount
+        lpToWithdraw = lpToWithdraw > lpBalance ? lpBalance : lpToWithdraw;
+        uint256 bptIn = lpToWithdraw;
+        uint256 amountA = 0;
+        uint256 amountB = 0;
+        ISwaapVault.ExitPoolRequest memory e;
+        e.assets = _gibDynamicArrayERC20(asset, borrowedAsset);
+        // @TODO use getUserDataForExactJoin
+        if (asset < borrowedAsset) {
+            e.minAmountsOut = _gibDynamicArrayUint256(amountA, amountB);
+        } else {
+            e.minAmountsOut = _gibDynamicArrayUint256(amountB, amountA);
+        }
+        e.userData = getUserDataForProportionalExit(bptIn);
+
+        uint256 assetBefore = ERC20(asset).balanceOf(address(this));
+        liquidityPool.exitPool(poolId, address(this), payable(address(this)), e);
+        uint256 assetFromExitPool = ERC20(asset).balanceOf(address(this)) - assetBefore;
+        // repay all borrowedAsset 
+        lendingPool.repay(borrowedAsset, ERC20(borrowedAsset).balanceOf(address(this)), 2, address(this));
+         // withdraw additional asset, to cover the entire requested amount
+        lendingPool.withdraw(asset, _amount - assetFromExitPool, address(this));
     }
     /**
      * @dev Internal function to harvest all rewards, redeploy any idle
@@ -320,18 +338,43 @@ contract SwaapStrategy is BaseStrategy, SwaapEncodings {
     // return priceBorrowedAsset / priceAsset in unit of 18
     function _borrowedAssetPriceInUnitOfAsset() private view returns(uint256) {
         (address poolAddress, ) = liquidityPool.getPool(poolId);
+        // ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
+        // oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
+        // (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
+        // (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
+        // if (asset > borrowedAsset) {
+        //     // asset is token1
+        //     return uint256(token0Price * 1e18 / token1Price);
+        // } else {
+        //     return uint256(token1Price * 1e18 / token0Price);
+        // }
+        return ISafeguardPool(poolAddress).getOnChainAmountInPerOut(address(borrowedAsset));
+    }
+
+    function _calcLpWithdraw(uint256 _amountAsset) internal view returns(uint256 lpAmount) {
+         (address poolAddress, ) = liquidityPool.getPool(poolId);
+        uint256[] memory balances = new uint256[](2);
+        (,balances,) = ISwaapVault(liquidityPool).getPoolTokens(poolId);
+        uint256 totalSupply = ERC20(poolAddress).totalSupply();
+        // fetch price from the oracle
         ISafeguardPool.OracleParams[] memory oracleParameter = new ISafeguardPool.OracleParams[](2);
         oracleParameter = ISafeguardPool(poolAddress).getOracleParams();
         (,int256 token0Price,,,) = oracleParameter[0].oracle.latestRoundData();
         (,int256 token1Price,,,) = oracleParameter[1].oracle.latestRoundData();
-        if (asset > borrowedAsset) {
-            // asset is token1
-            return uint256(token0Price * 1e18 / token1Price);
+        uint256 token0Value;
+        uint256 token1Value;
+        uint256 lpAmount;
+        if (asset < borrowedAsset) {
+            token0Value = tokenAmountIn18Decimals(asset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(borrowedAsset, balances[1]) * uint256(token1Price);
+            lpAmount = tokenAmountIn18Decimals(asset, _amountAsset) * uint256(token0Price) * totalSupply / (token0Value + token1Value);
         } else {
-            return uint256(token1Price * 1e18 / token0Price);
+            token0Value = tokenAmountIn18Decimals(borrowedAsset, balances[0]) * uint256(token0Price);
+            token1Value = tokenAmountIn18Decimals(asset, balances[1]) * uint256(token1Price);
+            lpAmount = tokenAmountIn18Decimals(asset, _amountAsset) * uint256(token1Price) * totalSupply / (token0Value + token1Value);
         }
+        
     }
-
     function _calcBPToExpect() internal view returns(uint256) {
         (address poolAddress, ) = liquidityPool.getPool(poolId);
         uint256[] memory balances = new uint256[](2);
