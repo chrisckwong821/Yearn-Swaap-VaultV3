@@ -146,6 +146,5 @@ enum Action {
         borrow,
         repay,
         join, 
-        exit,
-        swap
+        exit
 }

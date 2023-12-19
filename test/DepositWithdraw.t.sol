@@ -35,6 +35,7 @@ contract DepositWithdrawTest is Test {
     bytes32 poolId= 0x3fbf7753ff5b217ca8ffbb441939c20bf3ec3be1000200000000000000000002;
     address AavePool = 0x8dFf5E27EA6b7AC08EbFdf9eB090F32ee9a30fcf;
     address TokenizedStrategyAddress =0x2e234DAe75C793f67A35089C9d99245E1C58470b;
+    address yearnFactory = 0x5615dEB798BB3E4dFa0139dFa1b3D433Cc23b72f;
     ERC20 SwaapUSDCMaticPoolToken = ERC20(0x3fbF7753fF5B217CA8FfBB441939c20bF3EC3be1);
 
     function setUp() public {

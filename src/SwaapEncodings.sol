@@ -1,4 +1,8 @@
 pragma solidity 0.8.18;
+
+// @notice Swaap expects specific encodings for their pool actions same to balancer V2
+// We couldnt find any helper contract in wild, so we developed one to do same for us
+// Reference : https://docs.balancer.fi/reference/joins-and-exits/pool-joins.html
 contract SwaapEncodings {   
 
     /*//////////////////////////////////////////////////////////////
